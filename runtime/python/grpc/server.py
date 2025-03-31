@@ -56,7 +56,8 @@ class CosyVoiceServiceImpl(cosyvoice_pb2_grpc.CosyVoiceServicer):
             
         logging.info('grpc service initialized')
 
-    def Inference(self, request, context):
+    def _process_request(self, request):
+        """处理请求的内部方法，供Inference和InferenceNonStream共用"""
         if request.HasField('sft_request'):
             logging.info('get sft inference request')
             model_output = self.cosyvoice.inference_sft(request.sft_request.tts_text, request.sft_request.spk_id)
@@ -90,20 +91,65 @@ class CosyVoiceServiceImpl(cosyvoice_pb2_grpc.CosyVoiceServicer):
                     logging.info(f'语音识别结果: {prompt_text}')
                 except Exception as e:
                     logging.error(f"语音识别失败: {str(e)}")
-                    context.set_code(grpc.StatusCode.INTERNAL)
-                    context.set_details(f"语音识别失败: {str(e)}")
-                    return
+                    raise Exception(f"语音识别失败: {str(e)}")
             
             model_output = self.cosyvoice.inference_instruct2(request.instruct_request.tts_text,
                                                               prompt_text,
                                                               prompt_speech_16k,
                                                               stream=False, speed=1)
+        return model_output
 
-        logging.info('send inference response')
-        for i in model_output:
-            response = cosyvoice_pb2.Response()
-            response.tts_audio = (i['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
-            yield response
+    def Inference(self, request, context):
+        try:
+            model_output = self._process_request(request)
+            logging.info('send inference response')
+            for i in model_output:
+                response = cosyvoice_pb2.Response()
+                response.tts_audio = (i['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
+                yield response
+        except Exception as e:
+            logging.error(f"Inference error: {str(e)}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Inference failed: {str(e)}")
+            return
+
+    def InferenceNonStream(self, request, context):
+        try:
+            # 获取模型输出
+            model_output = self._process_request(request)
+            
+            # 合并所有音频片段
+            logging.info('合并音频片段为单一响应')
+            all_audio_segments = []
+            for i in model_output:
+                audio_segment = (i['tts_speech'].numpy() * (2 ** 15)).astype(np.int16)
+                all_audio_segments.append(audio_segment)
+            
+            # 连接所有音频片段
+            if all_audio_segments:
+                combined_audio = np.concatenate(all_audio_segments, axis=1)
+                audio_bytes = combined_audio.tobytes()
+                
+                # 创建非流式响应
+                return cosyvoice_pb2.NonStreamResponse(
+                    tts_audio=audio_bytes,
+                    success=True,
+                    error_message=""
+                )
+            else:
+                return cosyvoice_pb2.NonStreamResponse(
+                    tts_audio=b'',
+                    success=False,
+                    error_message="No audio generated"
+                )
+                
+        except Exception as e:
+            logging.error(f"NonStream inference error: {str(e)}")
+            return cosyvoice_pb2.NonStreamResponse(
+                tts_audio=b'',
+                success=False,
+                error_message=str(e)
+            )
 
     def SpeechRecognition(self, request, context):
         if self.asr_model is None:
