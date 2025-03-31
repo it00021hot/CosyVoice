@@ -56,8 +56,9 @@ def main():
             logging.info('send instruct request')
             instruct_request = cosyvoice_pb2.instructRequest()
             instruct_request.tts_text = args.tts_text
-            instruct_request.spk_id = args.spk_id
-            instruct_request.instruct_text = args.instruct_text
+            instruct_request.prompt_text = args.prompt_text
+            prompt_speech = load_wav(args.prompt_wav, 16000)
+            instruct_request.prompt_audio = (prompt_speech.numpy() * (2**15)).astype(np.int16).tobytes()
             request.instruct_request.CopyFrom(instruct_request)
 
         response = stub.Inference(request)
@@ -74,10 +75,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--host',
                         type=str,
-                        default='0.0.0.0')
+                        default='127.0.0.1')
     parser.add_argument('--port',
                         type=int,
-                        default='50000')
+                        default='9090')
     parser.add_argument('--mode',
                         default='sft',
                         choices=['sft', 'zero_shot', 'cross_lingual', 'instruct'],

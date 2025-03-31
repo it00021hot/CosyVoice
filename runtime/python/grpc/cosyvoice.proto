@@ -5,6 +5,7 @@ option go_package = "protos/";
 
 service CosyVoice{
   rpc Inference(Request) returns (stream Response) {}
+  rpc SpeechRecognition(ASRRequest) returns (ASRResponse) {}
 }
 
 message Request{
@@ -34,10 +35,20 @@ message crosslingualRequest{
 
 message instructRequest{
   string tts_text = 1;
-  string spk_id = 2;
-  string instruct_text = 3;
+  bytes prompt_audio = 2;
+  string prompt_text = 3;
 }
 
 message Response{
   bytes tts_audio = 1;
+}
+
+message ASRRequest {
+  bytes audio_data = 1;
+}
+
+message ASRResponse {
+  string text = 1;
+  bool success = 2;
+  string error_message = 3;  // 如果success为false，则包含错误信息
 }

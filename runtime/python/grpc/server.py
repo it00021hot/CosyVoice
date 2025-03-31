@@ -26,6 +26,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/../../..'.format(ROOT_DIR))
 sys.path.append('{}/../../../third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
+from funasr import AutoModel
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)s %(message)s')
@@ -40,6 +41,19 @@ class CosyVoiceServiceImpl(cosyvoice_pb2_grpc.CosyVoiceServicer):
                 self.cosyvoice = CosyVoice2(args.model_dir)
             except Exception:
                 raise TypeError('no valid model_type!')
+        
+        # 初始化ASR模型
+        try:
+            self.asr_model = AutoModel(
+                model="../../../pretrained_models/SenseVoiceSmall",
+                disable_update=True,
+                log_level='DEBUG',
+                device="cuda:0" if torch.cuda.is_available() else "cpu"
+            )
+        except Exception as e:
+            logging.error(f"Failed to initialize ASR model: {str(e)}")
+            self.asr_model = None
+            
         logging.info('grpc service initialized')
 
     def Inference(self, request, context):
@@ -60,15 +74,68 @@ class CosyVoiceServiceImpl(cosyvoice_pb2_grpc.CosyVoiceServicer):
             model_output = self.cosyvoice.inference_cross_lingual(request.cross_lingual_request.tts_text, prompt_speech_16k)
         else:
             logging.info('get instruct inference request')
-            model_output = self.cosyvoice.inference_instruct(request.instruct_request.tts_text,
-                                                             request.instruct_request.spk_id,
-                                                             request.instruct_request.instruct_text)
+            prompt_speech_16k = torch.from_numpy(np.array(np.frombuffer(request.instruct_request.prompt_audio, dtype=np.int16))).unsqueeze(dim=0)
+            prompt_speech_16k = prompt_speech_16k.float() / (2**15)
+            
+            # 如果prompt_text为空，进行自动语音识别
+            prompt_text = request.instruct_request.prompt_text
+            if not prompt_text and self.asr_model is not None:
+                try:
+                    logging.info('prompt_text为空，开始自动语音识别')
+                    res = self.asr_model.generate(
+                        input=request.instruct_request.prompt_audio,
+                        use_itn=True
+                    )
+                    prompt_text = res[0]["text"].split('|>')[-1]
+                    logging.info(f'语音识别结果: {prompt_text}')
+                except Exception as e:
+                    logging.error(f"语音识别失败: {str(e)}")
+                    context.set_code(grpc.StatusCode.INTERNAL)
+                    context.set_details(f"语音识别失败: {str(e)}")
+                    return
+            
+            model_output = self.cosyvoice.inference_instruct2(request.instruct_request.tts_text,
+                                                              prompt_text,
+                                                              prompt_speech_16k,
+                                                              stream=False, speed=1)
 
         logging.info('send inference response')
         for i in model_output:
             response = cosyvoice_pb2.Response()
             response.tts_audio = (i['tts_speech'].numpy() * (2 ** 15)).astype(np.int16).tobytes()
             yield response
+
+    def SpeechRecognition(self, request, context):
+        if self.asr_model is None:
+            return cosyvoice_pb2.ASRResponse(
+                text="",
+                success=False,
+                error_message="ASR model not initialized"
+            )
+            
+        try:
+            # 直接使用音频bytes进行识别
+            res = self.asr_model.generate(
+                input=request.audio_data,
+                use_itn=True
+            )
+            
+            # 提取识别结果
+            text = res[0]["text"].split('|>')[-1]
+            
+            return cosyvoice_pb2.ASRResponse(
+                text=text,
+                success=True,
+                error_message=""
+            )
+            
+        except Exception as e:
+            logging.error(f"Speech recognition error: {str(e)}")
+            return cosyvoice_pb2.ASRResponse(
+                text="",
+                success=False,
+                error_message=str(e)
+            )
 
 
 def main():
@@ -84,13 +151,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port',
                         type=int,
-                        default=50000)
+                        default=9090)
     parser.add_argument('--max_conc',
                         type=int,
                         default=4)
     parser.add_argument('--model_dir',
                         type=str,
-                        default='iic/CosyVoice-300M',
+                        default='../../../pretrained_models/CosyVoice2-0.5B',
                         help='local path or modelscope repo id')
     args = parser.parse_args()
     main()
